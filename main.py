@@ -70,7 +70,8 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS polls (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                is_closed INTEGER NOT NULL DEFAULT 0
+                is_closed INTEGER NOT NULL DEFAULT 0,
+                legionnaires_count INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS poll_participants (
@@ -100,6 +101,16 @@ def init_db() -> None:
             );
             """
         )
+
+        poll_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(polls)").fetchall()
+        }
+        if "legionnaires_count" not in poll_columns:
+            conn.execute(
+                "ALTER TABLE polls ADD COLUMN legionnaires_count INTEGER NOT NULL DEFAULT 0"
+            )
+
         conn.commit()
 
 
@@ -147,6 +158,34 @@ def remove_participant(poll_id: int, user_id: int) -> None:
         conn.commit()
 
 
+def set_not_going(poll_id: int, user_id: int) -> bool:
+    with closing(get_db_connection()) as conn:
+        poll = conn.execute(
+            "SELECT is_closed FROM polls WHERE id = ?",
+            (poll_id,),
+        ).fetchone()
+        if poll is None:
+            raise ValueError("Poll not found")
+        if poll["is_closed"]:
+            raise RuntimeError("Poll is closed")
+
+        existing = conn.execute(
+            "SELECT id FROM poll_participants WHERE poll_id = ? AND user_id = ?",
+            (poll_id, user_id),
+        ).fetchone()
+
+        if existing:
+            conn.execute(
+                "DELETE FROM poll_participants WHERE poll_id = ? AND user_id = ?",
+                (poll_id, user_id),
+            )
+            conn.commit()
+            logging.info("Set not going for user_id=%s in poll_id=%s", user_id, poll_id)
+            return True
+
+        return False
+
+
 def toggle_participant(poll_id: int, user_id: int, username: str | None, full_name: str) -> bool:
     with closing(get_db_connection()) as conn:
         poll = conn.execute(
@@ -184,10 +223,36 @@ def toggle_participant(poll_id: int, user_id: int, username: str | None, full_na
         return True
 
 
+def change_legionnaires(poll_id: int, delta: int) -> int:
+    with closing(get_db_connection()) as conn:
+        poll = conn.execute(
+            "SELECT is_closed, legionnaires_count FROM polls WHERE id = ?",
+            (poll_id,),
+        ).fetchone()
+        if poll is None:
+            raise ValueError("Poll not found")
+        if poll["is_closed"]:
+            raise RuntimeError("Poll is closed")
+
+        new_value = max(0, int(poll["legionnaires_count"]) + delta)
+        conn.execute(
+            "UPDATE polls SET legionnaires_count = ? WHERE id = ?",
+            (new_value, poll_id),
+        )
+        conn.commit()
+        logging.info(
+            "Changed legionnaires for poll_id=%s by %s, new value=%s",
+            poll_id,
+            delta,
+            new_value,
+        )
+        return new_value
+
+
 def build_poll_text(poll_id: int) -> str:
     with closing(get_db_connection()) as conn:
         poll = conn.execute(
-            "SELECT id, is_closed FROM polls WHERE id = ?",
+            "SELECT id, is_closed, legionnaires_count FROM polls WHERE id = ?",
             (poll_id,),
         ).fetchone()
         if poll is None:
@@ -216,12 +281,17 @@ def build_poll_text(poll_id: int) -> str:
         lines.append("— пока никого")
     else:
         for index, participant in enumerate(participants, start=1):
-            display_name = (
-                f"@{participant['username']}"
-                if participant["username"]
-                else participant["full_name"]
-            )
-            lines.append(f"{index}. {display_name}")
+            lines.append(f"{index}. {participant['full_name']}")
+
+    players_count = len(participants)
+    legionnaires_count = int(poll["legionnaires_count"])
+    total_count = players_count + legionnaires_count
+
+    lines.append("")
+    lines.append("Итог:")
+    lines.append(f"Игроки: {players_count}")
+    lines.append(f"Легионеры: {legionnaires_count}")
+    lines.append(f"Всего: {total_count}")
 
     return "\n".join(lines)
 
@@ -231,7 +301,16 @@ def get_poll_keyboard(poll_id: int, is_closed: bool = False) -> InlineKeyboardMa
         return None
 
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("✅ Иду", callback_data=f"toggle_poll:{poll_id}")]]
+        [
+            [
+                InlineKeyboardButton("✅ Иду", callback_data=f"poll_action:{poll_id}:go"),
+                InlineKeyboardButton("❌ Не иду", callback_data=f"poll_action:{poll_id}:no"),
+            ],
+            [
+                InlineKeyboardButton("Легионер +", callback_data=f"poll_action:{poll_id}:legion_plus"),
+                InlineKeyboardButton("Легионер -", callback_data=f"poll_action:{poll_id}:legion_minus"),
+            ],
+        ]
     )
 
 
@@ -414,20 +493,38 @@ async def poll_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     data = query.data or ""
-    if not data.startswith("toggle_poll:"):
+    if not data.startswith("poll_action:"):
         await query.answer()
         return
 
-    poll_id = int(data.split(":", 1)[1])
+    _, poll_id_raw, action = data.split(":", 2)
+    poll_id = int(poll_id_raw)
     user = query.from_user
 
     try:
-        is_added = toggle_participant(
-            poll_id=poll_id,
-            user_id=user.id,
-            username=user.username,
-            full_name=user.full_name,
-        )
+        if action == "go":
+            is_added = toggle_participant(
+                poll_id=poll_id,
+                user_id=user.id,
+                username=user.username,
+                full_name=user.full_name,
+            )
+            answer_text = "Вы записались." if is_added else "Вы убраны из списка."
+        elif action == "no":
+            was_removed = set_not_going(
+                poll_id=poll_id,
+                user_id=user.id,
+            )
+            answer_text = "Вы отметились как не идущий." if was_removed else "Вы уже не в списке."
+        elif action == "legion_plus":
+            new_value = change_legionnaires(poll_id=poll_id, delta=1)
+            answer_text = f"Легионеров: {new_value}"
+        elif action == "legion_minus":
+            new_value = change_legionnaires(poll_id=poll_id, delta=-1)
+            answer_text = f"Легионеров: {new_value}"
+        else:
+            await query.answer()
+            return
     except ValueError:
         await query.answer("Опрос не найден.", show_alert=True)
         return
@@ -436,7 +533,7 @@ async def poll_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     await sync_poll_messages(context.application, poll_id)
-    await query.answer("Вы записались." if is_added else "Вы убраны из списка.")
+    await query.answer(answer_text)
 
 
 async def scheduled_new_poll(application: Application) -> None:
@@ -497,7 +594,9 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("newpoll", new_poll_command))
     application.add_handler(CommandHandler("current", current_command))
     application.add_handler(CommandHandler("closepoll", close_poll_command))
-    application.add_handler(CallbackQueryHandler(poll_callback, pattern=r"^toggle_poll:\d+$"))
+    application.add_handler(
+        CallbackQueryHandler(poll_callback, pattern=r"^poll_action:\d+:[a-z_]+$")
+    )
 
     scheduler.add_job(
         scheduled_new_poll,
