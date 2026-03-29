@@ -5,5 +5,7 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      DB_PATH: /data/bot.db
     volumes:
-      - ./bot.db:/app/bot.db
+      - ./data:/data
