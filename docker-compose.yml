@@ -1,0 +1,9 @@
+services:
+  bot:
+    build: .
+    container_name: football-poll-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./bot.db:/app/bot.db

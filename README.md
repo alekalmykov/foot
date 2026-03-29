@@ -2,6 +2,8 @@
 
 Простой Telegram-бот на Python для общих футбольных опросов и записи участников.
 
+Рекомендуемый способ запуска на Linux: через Docker и `docker compose`.
+
 ## Возможности
 
 - `/start` — приветствие и список команд
@@ -18,6 +20,9 @@
 - `main.py` — весь код бота
 - `requirements.txt` — зависимости
 - `.env.example` — пример переменных окружения
+- `Dockerfile` — образ для запуска бота
+- `docker-compose.yml` — удобный запуск через Docker Compose
+- `.dockerignore` — исключения для сборки образа
 - `bot.db` — SQLite база, создаётся автоматически при первом запуске
 
 ## Переменные окружения
@@ -38,34 +43,88 @@ TIMEZONE=Europe/Moscow
 - `CRON_SCHEDULE` — cron-расписание для автосоздания опроса
 - `TIMEZONE` — таймзона планировщика
 
-## Установка и запуск
+## Быстрый запуск через Docker на Linux
+
+Нужно, чтобы были установлены Docker и Docker Compose Plugin.
+
+1. Создайте файл `.env`:
+
+```bash
+cp .env.example .env
+```
+
+2. Откройте `.env` и заполните минимум `BOT_TOKEN`.
+
+Пример:
+
+```env
+BOT_TOKEN=1234567890:your_bot_token_here
+DEFAULT_CHAT_ID=-1001234567890
+CRON_SCHEDULE=0 18 * * 0
+TIMEZONE=Europe/Moscow
+```
+
+3. Соберите и запустите контейнер:
+
+```bash
+docker compose up -d --build
+```
+
+4. Посмотреть логи:
+
+```bash
+docker compose logs -f
+```
+
+5. Остановить бота:
+
+```bash
+docker compose down
+```
+
+### Как хранится SQLite
+
+В `docker-compose.yml` база хранится в файле проекта:
+
+```yaml
+volumes:
+  - ./bot.db:/app/bot.db
+```
+
+Это значит:
+
+- данные сохраняются между перезапусками контейнера
+- бот запускается одной репликой
+- для SQLite это нормальный и практичный вариант
+
+## Локальный запуск без Docker
 
 Нужен Python 3.11+.
 
 1. Создайте и активируйте виртуальное окружение:
 
-```powershell
+```bash
 python -m venv .venv
-.venv\Scripts\Activate.ps1
+source .venv/bin/activate
 ```
 
 2. Установите зависимости:
 
-```powershell
+```bash
 pip install -r requirements.txt
 ```
 
 3. Создайте `.env`:
 
-```powershell
-Copy-Item .env.example .env
+```bash
+cp .env.example .env
 ```
 
 4. Заполните `BOT_TOKEN` и при необходимости `DEFAULT_CHAT_ID`.
 
 5. Запустите бота:
 
-```powershell
+```bash
 python main.py
 ```
 
@@ -149,3 +208,5 @@ python main.py
 - Если Telegram вернёт `message is not modified`, это не считается ошибкой
 - Если сообщение больше нельзя редактировать или оно не найдено, запись о нём удаляется из БД
 - Бот работает как shared-state bot: один и тот же poll можно показывать в нескольких сообщениях, и все они будут синхронно обновляться
+- Для `SQLite` не стоит запускать несколько реплик бота одновременно
+- Если позже понадобится несколько реплик, лучше перейти с `SQLite` на PostgreSQL
